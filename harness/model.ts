@@ -1,3 +1,5 @@
-import { openai } from "@ai-sdk/openai";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 
-export const model = openai("gpt-5.5");
+
+const openrouter = createOpenRouter();
+export const model = openrouter.chat("openai/gpt-6-luna");
