@@ -52,3 +52,28 @@ export const tools = {
         execute: async ({ itemId, draftId }) => ({ sent: true, itemId, draftId }),
     }),
 }
+
+
+
+export async function runTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  switch (name) {
+    case "searchKnowledgeBase": {
+      const query = String(args.query ?? "").toLowerCase();
+      const hits = Object.entries(KNOWLEDGE_BASE)
+        .filter(([key]) => query.includes(key))
+        .map(([, article]) => article);
+      return { articles: hits.length ? hits : ["No exact match — use your judgment."] };
+    }
+    case "classifyItem":
+      return { ok: true, itemId: args.itemId, category: args.category };
+    case "draftReply":
+      return { ok: true, draftId: `draft-${args.itemId}` };
+    case "sendReply":
+      return { sent: true, itemId: args.itemId, draftId: args.draftId };
+    default:
+      throw new Error(`unknown tool: ${name}`);
+  }
+}
