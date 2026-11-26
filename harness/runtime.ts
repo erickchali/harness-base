@@ -3,10 +3,18 @@ import type { JSONValue, ModelMessage } from 'ai';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { model } from './model';
 import { runTool, tools } from './tools';
-import { SYSTEM_PROMPT } from './system-prompt';
-import { randomUUID } from "node:crypto";
+
 import { EventType, type Emit } from "@shared/events";
 import { emit } from './bus';
+import {
+  buildContext,
+  summarize,
+  estimateTokens,
+  MAX_CONTEXT_TOKENS,
+  KEEP_CONTEXT_TOKENS
+} from './memory';
+import { SYSTEM_PROMPT } from './system-prompt';
+
 
 // This is the seam the whole course lives in.
 //
@@ -15,14 +23,20 @@ import { emit } from './bus';
 // server → bus → browser) with this hole in the middle.
 
 // if we fall into an infinite tool call loop we can stop after the max count is reached
-const MAX_ALLOWED_STEPS = 10;
+const MAX_ALLOWED_STEPS = 30;
 
 type ToolCall = { toolCallId: string; toolName: string; input: Record<string, unknown> };
 type Turn = { text: string; toolCalls: ToolCall[]; responseMessages: ModelMessage[] };
 
 
 async function modelTurn(workflowId: string, messages: ModelMessage[]): Promise<Turn> {
-  const result = streamText({ model, messages, tools });
+  const result = streamText({
+    model,
+    instructions: SYSTEM_PROMPT,
+    allowSystemInMessages: true,
+    messages,
+    tools
+  });
 
   for await (const part of result.stream) {
     if (part.type === "text-delta") {
@@ -71,51 +85,48 @@ export async function agentWorkflow(input: string): Promise<string> {
 
   await DBOS.runStep(() => emit({ type: EventType.WorkflowStarted, workflowId, input }), { name: 'tool call started' });
 
-  const messages: ModelMessage[] = [
-    { role: 'user', content: input }
-  ];
+  // const messages: ModelMessage[] = [
+  //   { role: 'user', content: input }
+  // ];
 
-  let step = 0;
+  let step: number = 0;
+  let turns: ModelMessage[][] = [];
+  let summary: string = ''
+
+
   while (step < MAX_ALLOWED_STEPS) {
-    const result = streamText({ model, messages, tools, instructions: SYSTEM_PROMPT })
-    const turn = await DBOS.runStep(() => modelTurn(workflowId, messages), {
+    console.log(`Tokens: ${estimateTokens(turns.flat())}`);
+    if (estimateTokens(turns.flat()) > MAX_CONTEXT_TOKENS) {
+      const old: ModelMessage[][] = [];
+      
+      while (turns.length > 1 && estimateTokens(turns.flat()) > KEEP_CONTEXT_TOKENS) {
+        const oldest = turns.shift();
+        if (oldest) old.push(oldest);
+      }
+      if (old.length > 0){
+      summary = await DBOS.runStep(() => summarize(old, summary), { name: `summarize-${step}` });
+      const contextTokens = estimateTokens(buildContext(input, summary, turns))
+      await DBOS.runStep(() => emit({
+        type: EventType.MemoryCompacted,
+        workflowId,
+        summarizedTurns: old.length,
+        contextTokens,
+        summary 
+      }), {name: `compacted-${step}`});
+    }
+    }
+
+    const context = buildContext(input, summary, turns);
+    const turn = await DBOS.runStep(() => modelTurn(workflowId, context), {
       name: `model-${step}`,
     });
-    const responseMessages = await turn.responseMessages;
-    // for await (const part of result.stream) {
-    //   switch (part.type) {
-    //     case 'text-delta':
-    //       emit({ type: EventType.ModelDelta, workflowId, text: part.text })
-    //       break;
-    //     case "tool-call":
-    //       emit({
-    //         type: EventType.ToolRequested,
-    //         workflowId,
-    //         toolCallId: part.toolCallId,
-    //         name: part.toolName,
-    //         args: part.input,
-    //       });
-    //       break;
-    //     case "tool-result":
-    //       emit({
-    //         type: EventType.ToolCompleted,
-    //         workflowId,
-    //         toolCallId: part.toolCallId,
-    //         result: part.output,
-    //       });
-    //       break;
-    //     case "error":
-    //       emit({ type: EventType.WorkflowFailed, workflowId, error: String(part.error) });
-    //       return;
-    //   }
-    // }
+    const turnMessages: ModelMessage[] = await turn.responseMessages;
 
-    console.log(JSON.stringify(responseMessages));
-    messages.push(...(responseMessages));
+    turnMessages.push(...(turnMessages));
 
     // no more tool calls, then it means we already have everything we need.
     if (turn.toolCalls.length === 0) {
-      const text = await result.text;
+      const text = await turn.text;
       await DBOS.runStep(
         () => emit({ type: EventType.ModelCompleted, workflowId, text: turn.text }),
         { name: `model-done-${step}` },
@@ -134,7 +145,7 @@ export async function agentWorkflow(input: string): Promise<string> {
       const output = await DBOS.runStep(() => toolStep(workflowId, call), {
         name: `tool-${call.toolCallId}`,
       });
-      messages.push({
+      turnMessages.push({
         role: 'tool',
         content: [{
           type: 'tool-result',
@@ -145,19 +156,20 @@ export async function agentWorkflow(input: string): Promise<string> {
       });
     }
 
+    turns.push(turnMessages);
     step++;
     console.log(`Current step: ${step}`)
   }
   await DBOS.runStep(
-      () =>
-        emit({
-          type: EventType.WorkflowFailed,
-          workflowId,
-          error: `Hit the ${MAX_ALLOWED_STEPS}-step limit without finishing.`,
-        }),
-      { name: "failed" },
-    );
-    return "";
+    () =>
+      emit({
+        type: EventType.WorkflowFailed,
+        workflowId,
+        error: `Hit the ${MAX_ALLOWED_STEPS}-step limit without finishing.`,
+      }),
+    { name: "failed" },
+  );
+  return "";
 }
 
 export const runAgentWorkflow = DBOS.registerWorkflow(agentWorkflow, {

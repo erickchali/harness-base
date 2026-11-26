@@ -12,6 +12,8 @@ Work through every item, then briefly summarize what you did.`;
 
 // A sample task to try.
 export const SAMPLE_TASK = `Handle these work items:
-- item-1 (customer_message): "I was charged twice and need help."
+- item-1 (billing): "What is your refund policy?".
 - item-2 (bug_report): "The export button fails on Safari."
-- item-3 (sales_request): "Can you send pricing for 50 seats?"`;
+- item-3 (sales): "Can you send pricing for 50 seats?"
+- item-4 (technical): "I can't log in after resetting my password."
+- item-5 (billing): "When will my refund post?"`;

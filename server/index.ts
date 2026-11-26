@@ -1,6 +1,6 @@
 import './env'
 import { DBOS } from '@dbos-inc/dbos-sdk';
-import { ensureSchema } from "harness/db";
+import { clearEventLog, ensureSchema } from "harness/db";
 import { subscribe, history } from "../harness/bus";
 
 import express from "express";
@@ -17,7 +17,15 @@ async function main() {
   await DBOS.launch();
 
   const app = express();
+  app.use((_req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*"); // inspector runs on a different port
+    next();
+  });
   app.get("/health", (_req, res) => {
+    res.json({ ok: true });
+  });
+  app.post("/api/clear", async (_req, res) => {
+    await clearEventLog();
     res.json({ ok: true });
   });
   const server = createServer(app);
